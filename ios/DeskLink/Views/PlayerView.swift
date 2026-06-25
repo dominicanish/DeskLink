@@ -115,10 +115,10 @@ struct PlayerView: View {
         GlassEffectContainer(spacing: 16) {
             HStack(spacing: 16) {
                 ToggleChip(
-                    title: model.micEnabled ? "Mic On" : "Mic Off",
+                    title: model.micCaptureEnabled ? (model.micEnabled ? "Mic On" : "Mic Off") : "Mic Soon",
                     symbol: model.micEnabled ? "mic.fill" : "mic.slash.fill",
                     active: model.micEnabled,
-                    available: model.client.negotiatedCaps.contains(Capability.mic)
+                    available: model.micCaptureEnabled && model.client.negotiatedCaps.contains(Capability.mic)
                 ) { model.toggleMic() }
 
                 ToggleChip(

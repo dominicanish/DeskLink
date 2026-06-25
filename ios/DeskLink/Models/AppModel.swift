@@ -20,6 +20,13 @@ final class AppModel: ObservableObject {
     @Published var serverName = "DeskLink"
     @Published var micPermissionDenied = false
 
+    /// Mic capture is temporarily disabled. Enabling it switches the audio session
+    /// to `.playAndRecord`, which currently silences the PC playback on-device.
+    /// Keeping the session on `.playback` guarantees playback never dies. Re-enable
+    /// when we build mic transmission properly (the server also needs a virtual mic
+    /// device for it to be usable by PC apps).
+    let micCaptureEnabled = false
+
     init() {
         // SwiftUI does not observe *nested* ObservableObjects: views read
         // `model.client.state` / `model.discovery.servers`, but only subscribe to
@@ -111,6 +118,8 @@ final class AppModel: ObservableObject {
     // MARK: Controls
 
     func toggleMic() {
+        // Deferred: never switch to the record session (it silences playback).
+        guard micCaptureEnabled else { return }
         guard client.negotiatedCaps.contains(Capability.mic) else { return }
         if micEnabled {
             audio.stopMic()
