@@ -160,6 +160,10 @@ private struct ToggleChip: View {
             .glassEffect(active ? .regular.tint(.white.opacity(0.22)).interactive()
                                 : .regular.interactive(),
                          in: .rect(cornerRadius: 18))
+            // Make the whole chip tappable, not just the drawn icon/text. With
+            // `.buttonStyle(.plain)` SwiftUI only hit-tests the opaque content,
+            // so without this only a tap on the glyph registered.
+            .contentShape(.rect(cornerRadius: 18))
         }
         .buttonStyle(.plain)
         .disabled(!available)
