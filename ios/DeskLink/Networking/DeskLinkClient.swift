@@ -10,10 +10,11 @@ enum ConnectionState: Equatable {
     case failed(String)
 }
 
-/// WebSocket client over Network.framework.
+/// WebSocket client built on `URLSessionWebSocketTask`.
 ///
-/// Latency: TCP_NODELAY is enabled and WebSocket permessage-deflate is left off,
-/// so 20 ms audio frames are flushed to the wire immediately.
+/// We use URLSession's WebSocket (not NWConnection) because it reliably performs
+/// the opening handshake. `ws://` to a LAN address is allowed by the
+/// `NSAllowsLocalNetworking` ATS exception in Info.plist.
 @MainActor
 final class DeskLinkClient: ObservableObject {
     @Published var state: ConnectionState = .idle
@@ -26,107 +27,133 @@ final class DeskLinkClient: ObservableObject {
 
     /// Receives decoded-ready playback payloads (opus or pcm) from the server.
     var onPlaybackPayload: ((Data) -> Void)?
-    /// Asks the audio engine which codec was negotiated for each stream.
     private(set) var playbackCodec = "pcm"
     private(set) var micCodec = "pcm"
 
-    private var connection: NWConnection?
+    private var task: URLSessionWebSocketTask?
+    private var resolver: NWConnection?
     private var pairingCode: String?
-    private var clientName = UIDeviceName()
+    private let clientName = UIDeviceName()
 
-    /// Connect by typed IP/host + port (Bonjour-independent fallback).
+    private lazy var session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.waitsForConnectivity = false
+        cfg.timeoutIntervalForRequest = 12
+        return URLSession(configuration: cfg)
+    }()
+
+    // MARK: Connecting
+
+    /// Connect by typed IP/host + port (the reliable, Bonjour-independent path).
     func connect(host: String, port: UInt16, pairingCode: String?) {
-        let ep = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
-                                     port: NWEndpoint.Port(rawValue: port) ?? 8765)
-        connect(to: ep, pairingCode: pairingCode)
+        guard let url = URL(string: "ws://\(host):\(port)/") else {
+            state = .failed("Invalid address."); return
+        }
+        open(url: url, pairingCode: pairingCode)
     }
 
+    /// Connect to a Bonjour-discovered endpoint. Service endpoints are resolved
+    /// to host:port first (URLSession needs a concrete URL).
     func connect(to endpoint: NWEndpoint, pairingCode: String?) {
+        if case let .hostPort(host, port) = endpoint {
+            connect(host: Self.hostString(host), port: port.rawValue, pairingCode: pairingCode)
+            return
+        }
+        resolve(endpoint, pairingCode: pairingCode)
+    }
+
+    private func open(url: URL, pairingCode: String?) {
         disconnect()
         self.pairingCode = pairingCode
         state = .connecting
+        let t = session.webSocketTask(with: url)
+        task = t
+        t.resume()                 // initiates the WebSocket handshake
+        receive()
 
-        let ws = NWProtocolWebSocket.Options()
-        ws.autoReplyPing = true
-        let tcp = NWProtocolTCP.Options()
-        tcp.noDelay = true                     // <- low latency
-        tcp.connectionTimeout = 5
-        let params = NWParameters(tls: nil, tcp: tcp)
-        params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
-
-        let conn = NWConnection(to: endpoint, using: params)
-        self.connection = conn
-        conn.stateUpdateHandler = { [weak self] st in
-            Task { @MainActor in self?.handleNWState(st) }
-        }
-        conn.start(queue: .main)
-        receiveLoop()
-
-        // If the handshake never completes, surface a helpful hint instead of
-        // spinning forever. The usual cause is the iOS Local Network permission
-        // being off, which blocks local connections silently.
+        // Helpful hint if the handshake never completes.
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 9_000_000_000)
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
             guard let self else { return }
             if case .connecting = self.state {
-                self.state = .failed("Couldn't reach the server. Open Settings → DeskLink and turn on Local Network, then check the IP/port and that you're on the same Wi-Fi.")
+                self.state = .failed("Couldn't reach the server. Check the IP/port, that you're on the same Wi-Fi, and that Local Network is on in Settings → DeskLink.")
             }
         }
     }
 
-    func disconnect() {
-        connection?.cancel()
-        connection = nil
-        state = .idle
-        negotiatedCaps = []
+    private func resolve(_ endpoint: NWEndpoint, pairingCode: String?) {
+        state = .connecting
+        let conn = NWConnection(to: endpoint, using: .tcp)
+        resolver = conn
+        conn.stateUpdateHandler = { [weak self] st in
+            Task { @MainActor in
+                guard let self else { return }
+                switch st {
+                case .ready:
+                    let remote = conn.currentPath?.remoteEndpoint
+                    conn.cancel(); self.resolver = nil
+                    if case let .hostPort(h, p) = remote {
+                        self.connect(host: Self.hostString(h), port: p.rawValue, pairingCode: pairingCode)
+                    } else {
+                        self.state = .failed("Couldn't resolve the server address.")
+                    }
+                case .failed(let e):
+                    conn.cancel(); self.resolver = nil
+                    self.state = .failed(e.localizedDescription)
+                default:
+                    break
+                }
+            }
+        }
+        conn.start(queue: .main)
     }
 
-    private func handleNWState(_ st: NWConnection.State) {
-        switch st {
-        case .failed(let err): state = .failed(err.localizedDescription)
-        case .cancelled: if state != .idle { state = .idle }
-        default: break
-        }
+    func disconnect() {
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        resolver?.cancel(); resolver = nil
+        state = .idle
+        negotiatedCaps = []
     }
 
     // MARK: Sending
 
     func sendControl(_ text: String) {
-        send(text.data(using: .utf8) ?? Data(), opcode: .text)
+        task?.send(.string(text)) { _ in }
     }
 
     func sendMicFrame(_ payload: Data, timestampMicros: UInt64) {
         let frame = DeskLinkProtocol.encodeAudioFrame(stream: .mic,
                                                       timestampMicros: timestampMicros,
                                                       payload: payload)
-        send(frame, opcode: .binary)
+        task?.send(.data(frame)) { _ in }
     }
 
-    private func send(_ data: Data, opcode: NWProtocolWebSocket.Opcode) {
-        guard let conn = connection else { return }
-        let meta = NWProtocolWebSocket.Metadata(opcode: opcode)
-        let ctx = NWConnection.ContentContext(identifier: "send", metadata: [meta])
-        conn.send(content: data, contentContext: ctx, isComplete: true, completion: .idempotent)
+    func ping() {
+        sendControl(DeskLinkProtocol.ping(Date().timeIntervalSince1970 * 1000))
     }
 
     // MARK: Receiving
 
-    private func receiveLoop() {
-        guard let conn = connection else { return }
-        conn.receiveMessage { [weak self] data, context, _, error in
+    private func receive() {
+        task?.receive { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
-                if let data, let context,
-                   let meta = context.protocolMetadata(definition: NWProtocolWebSocket.definition)
-                        as? NWProtocolWebSocket.Metadata {
-                    switch meta.opcode {
-                    case .text: self.handleText(data)
-                    case .binary: self.handleBinary(data)
-                    case .close: self.state = .idle
-                    default: break
+                switch result {
+                case .failure(let error):
+                    if case .connecting = self.state {
+                        self.state = .failed(error.localizedDescription)
+                    } else {
+                        self.state = .idle
                     }
+                case .success(let message):
+                    switch message {
+                    case .string(let text): self.handleText(Data(text.utf8))
+                    case .data(let data): self.handleBinary(data)
+                    @unknown default: break
+                    }
+                    self.receive()   // keep listening
                 }
-                if error == nil { self.receiveLoop() }
             }
         }
     }
@@ -139,8 +166,8 @@ final class DeskLinkClient: ObservableObject {
     }
 
     private func handleText(_ data: Data) {
-        guard let text = String(data: data, encoding: .utf8),
-              let ctrl = DeskLinkProtocol.decodeControl(text) else { return }
+        guard let ctrl = DeskLinkProtocol.decodeControl(String(decoding: data, as: UTF8.self))
+        else { return }
         switch ctrl.type {
         case "hello": handleHello(ctrl)
         case "ready": handleReady(ctrl)
@@ -155,7 +182,8 @@ final class DeskLinkClient: ObservableObject {
             }
         case "bye":
             state = .failed((ctrl["reason"] as? String) ?? "closed")
-        default: break
+        default:
+            break
         }
     }
 
@@ -168,7 +196,6 @@ final class DeskLinkClient: ObservableObject {
         let audio = ctrl["audio"] as? [String: Any]
         let serverPlayback = (audio?["playback"] as? [String: Any])?["codec"] as? String ?? "pcm"
         let serverMic = (audio?["mic"] as? [String: Any])?["codec"] as? String ?? "pcm"
-        // We can decode Opus if OpusKit is linked; otherwise request pcm.
         playbackCodec = OpusCodec.available && serverPlayback == "opus" ? "opus" : "pcm"
         micCodec = OpusCodec.available && serverMic == "opus" ? "opus" : "pcm"
 
@@ -201,8 +228,15 @@ final class DeskLinkClient: ObservableObject {
         nowPlaying = np
     }
 
-    func ping() {
-        sendControl(DeskLinkProtocol.ping(Date().timeIntervalSince1970 * 1000))
+    // MARK: Helpers
+
+    private static func hostString(_ host: NWEndpoint.Host) -> String {
+        switch host {
+        case .name(let n, _): return n
+        case .ipv4(let a): return "\(a)".components(separatedBy: "%").first ?? "\(a)"
+        case .ipv6(let a): return "\(a)".components(separatedBy: "%").first ?? "\(a)"
+        @unknown default: return "\(host)"
+        }
     }
 }
 

@@ -158,6 +158,7 @@ class DeskLinkServer:
     async def _metadata_pump(self) -> None:
         """Poll SMTC and push now-playing + transport state to clients."""
         last_state: tuple | None = None
+        last_track: tuple | None = None
         while True:
             try:
                 np = await self.smtc.poll()
@@ -166,6 +167,10 @@ class DeskLinkServer:
                 np = None
 
             if np is not None:
+                track = (np.title, np.artist, np.app)
+                if track != last_track:
+                    log.info("now playing: %r — %r [%s]", np.title, np.artist, np.app)
+                    last_track = track
                 msg = proto.nowplaying(
                     title=np.title, artist=np.artist, album=np.album, app=np.app,
                     duration_ms=np.duration_ms, position_ms=np.position_ms,

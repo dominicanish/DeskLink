@@ -51,6 +51,13 @@
         <string>_desklink._tcp</string>
     </array>
 
+    <!-- Allow ws:// (no TLS) to LAN/private addresses for URLSession WebSocket. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+
     <!-- Microphone: only used when you turn the mic on to talk to the PC. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>DeskLink sends your microphone to your PC while the mic is enabled.</string>
