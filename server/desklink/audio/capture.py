@@ -11,10 +11,13 @@ asyncio queue via a thread-safe callback supplied by the server.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 
 from ..config import FRAME_MS, PLAYBACK_CHANNELS, PLAYBACK_RATE
+
+log = logging.getLogger("desklink.capture")
 
 try:
     import pyaudiowpatch as pyaudio  # type: ignore
@@ -22,6 +25,13 @@ try:
 except Exception:  # pragma: no cover - Windows-only dependency
     pyaudio = None  # type: ignore
     _AVAILABLE = False
+
+try:
+    import numpy as np  # part of the [windows] extra
+    _NUMPY = True
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
+    _NUMPY = False
 
 
 def available() -> bool:
@@ -44,6 +54,7 @@ class LoopbackCapture:
         self._pa: "pyaudio.PyAudio | None" = None
         self._stream = None
         self._lock = threading.Lock()
+        self._float = False
 
     def _default_loopback_device(self) -> dict:
         """Find the loopback companion of the default output device."""
@@ -62,8 +73,16 @@ class LoopbackCapture:
             dev = self._default_loopback_device()
             self._channels = int(dev["maxInputChannels"]) or self._channels
             self._rate = int(dev["defaultSampleRate"]) or self._rate
+            # WASAPI shared-mode loopback delivers 32-bit float. Capture in that
+            # native format and convert to s16le ourselves (the wire format the
+            # client expects). Requesting paInt16 directly yields garbage/noise.
+            self._float = _NUMPY
+            fmt = pyaudio.paFloat32 if self._float else pyaudio.paInt16
+            log.info("Capturing loopback device: %s (%d Hz, %d ch, %s)",
+                     dev.get("name"), self._rate, self._channels,
+                     "float32->int16" if self._float else "int16")
             self._stream = self._pa.open(
-                format=pyaudio.paInt16,
+                format=fmt,
                 channels=self._channels,
                 rate=self._rate,
                 frames_per_buffer=self._frames_per_buffer,
@@ -74,9 +93,15 @@ class LoopbackCapture:
             self._stream.start_stream()
 
     def _callback(self, in_data, frame_count, time_info, status):  # noqa: ANN001
-        # Called on PortAudio's thread. Hand the PCM off without blocking.
+        # Called on PortAudio's thread. Convert float32 -> s16le if needed, then
+        # hand the PCM off without blocking.
         try:
-            self._on_frame(in_data)
+            if self._float and np is not None:
+                f = np.frombuffer(in_data, dtype=np.float32)
+                pcm = (np.clip(f, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            else:
+                pcm = in_data
+            self._on_frame(pcm)
         except Exception:
             pass
         return (None, pyaudio.paContinue)

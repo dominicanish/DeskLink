@@ -106,6 +106,16 @@ final class DeskLinkClient: ObservableObject {
             }
         }
         conn.start(queue: .main)
+
+        // Don't hang on "Connecting…" if Bonjour resolution stalls.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self else { return }
+            if self.resolver === conn, case .connecting = self.state {
+                conn.cancel(); self.resolver = nil
+                self.state = .failed("Couldn't resolve the server over Bonjour. Use \"Connect by IP\" with the address shown on the PC.")
+            }
+        }
     }
 
     func disconnect() {
