@@ -35,6 +35,13 @@ final class AudioEngine {
     private var onMicFrame: ((Data, UInt64) -> Void)?
     private(set) var outputMuted = false
 
+    // Mic wire format the server expects: 48 kHz mono s16le. The tap delivers the
+    // hardware's native format; we convert to this. Converter is built lazily from
+    // the first buffer's actual format (we don't assume the input rate up front).
+    private lazy var micWireFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
+                                                   channels: 1, interleaved: true)!
+    private var micConverter: AVAudioConverter?
+
     init() {
         ring = [Float](repeating: 0, count: capFrames * 2)
     }
@@ -164,10 +171,12 @@ final class AudioEngine {
     // MARK: Mic (phone -> server)
 
     /// Mic capture must be enabled *only* after the record permission is granted
-    /// (the caller guarantees this). We fully stop the engine before touching the
-    /// input node and reconfiguring the session — mutating a live graph (the old
-    /// `pause()` path) and tapping with a mismatched format threw an uncatchable
-    /// Objective-C exception that crashed the app.
+    /// (the caller guarantees this). We fully stop the engine before reconfiguring
+    /// the session for record, then install the tap with `format: nil` so the tap
+    /// adopts the input bus's *own* hardware format. Passing an explicit format
+    /// (even `inputFormat`/`outputFormat(forBus:)`) didn't match the bus exactly
+    /// on-device and made `CreateRecordingTap` throw an uncatchable Obj-C
+    /// exception (SIGABRT) that crashed the app.
     @discardableResult
     func startMic(onFrame: @escaping (Data, UInt64) -> Void) -> Bool {
         guard !micActive else { return true }
@@ -181,47 +190,51 @@ final class AudioEngine {
             return false
         }
 
-        let input = engine.inputNode
-        // The tap is on the input node's *output* bus, so its format must be
-        // `outputFormat(forBus:)` — using a different format is what asserts.
-        let tapFormat = input.outputFormat(forBus: 0)
-        guard tapFormat.channelCount > 0, tapFormat.sampleRate > 0,
-              let micFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
-                                            channels: 1, interleaved: true),
-              let conv = AVAudioConverter(from: tapFormat, to: micFormat) else {
-            restorePlaybackSession()
-            return false
-        }
-
         onMicFrame = onFrame
-        input.installTap(onBus: 0, bufferSize: 1024, format: tapFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            let ratio = micFormat.sampleRate / tapFormat.sampleRate
-            let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
-            guard let out = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: cap) else { return }
-            var fed = false
-            var err: NSError?
-            conv.convert(to: out, error: &err) { _, status in
-                if fed { status.pointee = .noDataNow; return nil }
-                fed = true; status.pointee = .haveData; return buffer
-            }
-            guard err == nil, let ch = out.int16ChannelData else { return }
-            let byteCount = Int(out.frameLength) * 2
-            let data = Data(bytes: ch[0], count: byteCount)
-            let ts = UInt64(Date().timeIntervalSince1970 * 1_000_000)
-            self.onMicFrame?(OpusCodec.available ? OpusCodec.encode(data) : data, ts)
-        }
+        micConverter = nil   // rebuilt lazily from the first buffer's real format
+        let input = engine.inputNode
+
+        // Start the engine *before* tapping so the input route/format has settled
+        // (the route is still changing right after the category switch — the crash
+        // log showed an in-flight `IOFormatsChanged`). Then tap with `format: nil`.
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
             onMicFrame = nil
             restorePlaybackSession()
             return false
         }
+        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            self?.handleMicBuffer(buffer)
+        }
         micActive = true
         return true
+    }
+
+    /// Convert one captured buffer (native format) to 48 kHz mono s16le and ship it.
+    private func handleMicBuffer(_ buffer: AVAudioPCMBuffer) {
+        let inFormat = buffer.format
+        if micConverter == nil
+            || micConverter!.inputFormat.sampleRate != inFormat.sampleRate
+            || micConverter!.inputFormat.channelCount != inFormat.channelCount {
+            micConverter = AVAudioConverter(from: inFormat, to: micWireFormat)
+        }
+        guard let conv = micConverter, buffer.frameLength > 0 else { return }
+        let ratio = micWireFormat.sampleRate / inFormat.sampleRate
+        let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
+        guard cap > 0, let out = AVAudioPCMBuffer(pcmFormat: micWireFormat, frameCapacity: cap) else { return }
+        var fed = false
+        var err: NSError?
+        conv.convert(to: out, error: &err) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true; status.pointee = .haveData; return buffer
+        }
+        guard err == nil, out.frameLength > 0, let ch = out.int16ChannelData else { return }
+        let byteCount = Int(out.frameLength) * 2
+        let data = Data(bytes: ch[0], count: byteCount)
+        let ts = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        onMicFrame?(OpusCodec.available ? OpusCodec.encode(data) : data, ts)
     }
 
     func stopMic() {
