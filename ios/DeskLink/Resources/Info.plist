@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>DeskLink</string>
+
+    <!-- Background audio so playback continues with the screen locked. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+
+    <!-- Live Activities (Dynamic Island). Local updates only — no push needed. -->
+    <key>NSSupportsLiveActivities</key>
+    <true/>
+    <key>NSSupportsLiveActivitiesFrequentUpdates</key>
+    <true/>
+
+    <!-- Local Network + Bonjour: required to discover and connect to the PC. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>DeskLink finds and connects to your PC on this Wi-Fi network to stream audio.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_desklink._tcp</string>
+    </array>
+
+    <!-- Microphone: only used when you turn the mic on to talk to the PC. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DeskLink sends your microphone to your PC while the mic is enabled.</string>
+
+    <!-- Custom URL scheme so the Dynamic Island can deep-link back to the player. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>black.dominican.desklink</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>desklink</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

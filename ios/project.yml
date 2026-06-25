@@ -1,0 +1,61 @@
+name: DeskLink
+
+options:
+  bundleIdPrefix: black.dominican
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    TARGETED_DEVICE_FAMILY: "1"   # iPhone
+    # Build without signing so CI can emit an unsigned IPA for AltStore/SideStore.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  DeskLink:
+    type: application
+    platform: iOS
+    sources:
+      - path: DeskLink
+    dependencies:
+      - target: DeskLinkWidget
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: black.dominican.desklink
+        INFOPLIST_FILE: DeskLink/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_PREVIEWS: "YES"
+
+  DeskLinkWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: DeskLinkWidget
+      # Shared model/attributes compiled into both targets.
+      - path: DeskLink/Models/Shared.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: black.dominican.desklink.widget
+        INFOPLIST_FILE: DeskLinkWidget/Info.plist
+        CFBundleDisplayName: DeskLink
+
+schemes:
+  DeskLink:
+    build:
+      targets:
+        DeskLink: all
+    run:
+      config: Debug
+    archive:
+      config: Release

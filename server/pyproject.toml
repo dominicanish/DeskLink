@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "desklink"
+version = "0.1.0"
+description = "Stream Windows PC audio to your iPhone over Wi-Fi, with mic return, now-playing metadata and transport controls."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Maykol" }]
+dependencies = [
+    "websockets>=12.0",
+    "zeroconf>=0.131",
+]
+
+# Windows-only runtime extras. The core (protocol, server loop) imports without
+# these so the package can be linted/tested on Linux CI; audio + SMTC degrade
+# gracefully with a clear message when missing.
+[project.optional-dependencies]
+windows = [
+    "PyAudioWPatch>=0.2.12",   # WASAPI loopback capture + render
+    "winsdk>=1.0.0b10",        # Windows.Media.Control (SMTC) projection
+    "numpy>=1.24",
+]
+opus = [
+    "opuslib>=3.0",            # low-latency Opus codec (optional; PCM fallback otherwise)
+]
+gui = [
+    "pystray>=0.19",
+    "Pillow>=10.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+desklink = "desklink.__main__:main"
+desklink-tray = "desklink.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["desklink*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

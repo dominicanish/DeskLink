@@ -1,0 +1,77 @@
+name: iOS build
+
+# Builds an UNSIGNED .ipa on a macOS runner (no Mac needed locally) and uploads
+# it as an artifact. Sideload it with AltStore / SideStore — they sign it with
+# your free Apple ID. See docs/INSTALL_IOS.md.
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/ios-build.yml"]
+  pull_request:
+    paths: ["ios/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: ios
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_26.app || sudo xcode-select -switch /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned archive)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DeskLink.xcodeproj \
+            -scheme DeskLink \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/DeskLink.xcarchive" \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive | xcpretty || xcodebuild \
+            -project DeskLink.xcodeproj \
+            -scheme DeskLink \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/DeskLink.xcarchive" \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/DeskLink.xcarchive/Products/Applications/DeskLink.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::DeskLink.app not found in archive"; exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          (cd "$RUNNER_TEMP" && zip -r -y -q DeskLink.ipa Payload)
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          mv "$RUNNER_TEMP/DeskLink.ipa" "$GITHUB_WORKSPACE/dist/DeskLink.ipa"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeskLink-unsigned-ipa
+          path: dist/DeskLink.ipa
+          if-no-files-found: error

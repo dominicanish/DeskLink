@@ -1,0 +1,32 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DeskLink">
+  <!-- App-icon squircle, graphite gradient (Apple-flavored, minimal, not bright) -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3A3A3C"/>
+      <stop offset="1" stop-color="#1C1C1E"/>
+    </linearGradient>
+    <linearGradient id="glyph" x1="160" y1="170" x2="352" y2="342" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F5F5F7"/>
+      <stop offset="1" stop-color="#C7C7CC"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle background -->
+  <path d="M256 24C141 24 84 24 54 54 24 84 24 141 24 256s0 172 30 202 87 30 202 30 172 0 202-30 30-87 30-202 0-172-30-202S371 24 256 24Z" fill="url(#bg)"/>
+
+  <!-- Two concentric "link" arcs forming an audio pulse between desk + device -->
+  <g stroke="url(#glyph)" stroke-linecap="round" fill="none">
+    <!-- left (PC) node -->
+    <circle cx="196" cy="256" r="20" fill="url(#glyph)" stroke="none"/>
+    <!-- right (device) node -->
+    <circle cx="316" cy="256" r="20" fill="url(#glyph)" stroke="none"/>
+    <!-- connecting link -->
+    <path d="M216 256h80" stroke-width="16"/>
+    <!-- outgoing sound arcs from PC node -->
+    <path d="M150 226c-14 18-14 42 0 60" stroke-width="14" opacity="0.85"/>
+    <path d="M126 206c-26 30-26 70 0 100" stroke-width="14" opacity="0.5"/>
+    <!-- incoming sound arcs into device node -->
+    <path d="M362 226c14 18 14 42 0 60" stroke-width="14" opacity="0.85"/>
+    <path d="M386 206c26 30 26 70 0 100" stroke-width="14" opacity="0.5"/>
+  </g>
+</svg>
