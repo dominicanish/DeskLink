@@ -78,11 +78,24 @@ class DeskLinkServer:
         self._mic_sink: play.MicPlayback | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pcm_in: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MAX_PLAYBACK_BACKLOG)
+        # Latest now-playing (incl. artwork) so a client that joins mid-track gets
+        # the full metadata immediately instead of waiting for the next track change.
+        self._np_snapshot: dict | None = None
+        self._np_state: dict | None = None  # latest transport_state for replay
+        self._np_artwork_b64: str | None = None
 
     # ---- lifecycle ----
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
+        # Put the event-loop thread into a COM multithreaded apartment *before*
+        # touching WASAPI or WinRT. PortAudio's WASAPI backend calls
+        # CoInitializeEx(STA) when the capture opens; an STA thread with no
+        # message pump never delivers WinRT async completions, so SMTC's
+        # ``poll()`` would hang forever and now-playing/transport-state would
+        # never reach the client. Claiming MTA first makes PortAudio's later STA
+        # request a harmless no-op (RPC_E_CHANGED_MODE) while capture still works.
+        _init_com_mta()
         # iOS opens short TCP reachability probes that never send a WebSocket
         # upgrade; that's harmless, so don't dump tracebacks for failed handshakes.
         logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
@@ -168,22 +181,40 @@ class DeskLinkServer:
 
             if np is not None:
                 track = (np.title, np.artist, np.app)
-                if track != last_track:
-                    log.info("now playing: %r — %r [%s]", np.title, np.artist, np.app)
-                    last_track = track
-                msg = proto.nowplaying(
+                track_changed = track != last_track
+                # Artwork only arrives on a track change; remember it so the
+                # snapshot stays complete for late joiners and position updates.
+                if np.artwork_jpeg_b64 is not None:
+                    self._np_artwork_b64 = np.artwork_jpeg_b64
+
+                # Full snapshot (with artwork) kept for clients that join mid-track.
+                self._np_snapshot = proto.nowplaying(
                     title=np.title, artist=np.artist, album=np.album, app=np.app,
                     duration_ms=np.duration_ms, position_ms=np.position_ms,
-                    playing=np.playing, artwork_b64=np.artwork_jpeg_b64,
+                    playing=np.playing, artwork_b64=self._np_artwork_b64,
                 )
-                state = (np.can_next, np.can_prev, np.can_seek)
-                await self._broadcast_json(msg, cap=proto.CAP_NOWPLAYING)
-                if state != last_state:
+
+                if track_changed:
+                    log.info("now playing: %r — %r [%s]", np.title, np.artist, np.app)
+                    last_track = track
+                    # New track: push the full message (with artwork) to everyone.
+                    await self._broadcast_json(self._np_snapshot, cap=proto.CAP_NOWPLAYING)
+                else:
+                    # Same track: a light update (no heavy artwork) for position/state.
                     await self._broadcast_json(
-                        proto.transport_state(can_next=np.can_next, can_prev=np.can_prev,
-                                               can_seek=np.can_seek),
-                        cap=proto.CAP_TRANSPORT,
+                        proto.nowplaying(
+                            title=np.title, artist=np.artist, album=np.album, app=np.app,
+                            duration_ms=np.duration_ms, position_ms=np.position_ms,
+                            playing=np.playing, artwork_b64=None,
+                        ),
+                        cap=proto.CAP_NOWPLAYING,
                     )
+
+                state = (np.can_next, np.can_prev, np.can_seek)
+                if state != last_state:
+                    self._np_state = proto.transport_state(
+                        can_next=np.can_next, can_prev=np.can_prev, can_seek=np.can_seek)
+                    await self._broadcast_json(self._np_state, cap=proto.CAP_TRANSPORT)
                     last_state = state
             await asyncio.sleep(1.0)  # position ticks; artwork only on track change
 
@@ -221,6 +252,14 @@ class DeskLinkServer:
 
         self.clients.add(session)
         log.info("client joined: %s (%s) caps=%s", session.name, session.id, session.caps)
+        # Replay the current now-playing (with artwork) + transport state so a
+        # client joining mid-track shows metadata immediately, not on next change.
+        if self._np_snapshot and session.wants(proto.CAP_NOWPLAYING):
+            with contextlib.suppress(Exception):
+                await session.ws.send(proto.dumps(self._np_snapshot))
+        if self._np_state and session.wants(proto.CAP_TRANSPORT):
+            with contextlib.suppress(Exception):
+                await session.ws.send(proto.dumps(self._np_state))
         sender = asyncio.create_task(self._client_sender(session))
         try:
             await self._client_receiver(session)
@@ -336,6 +375,25 @@ class DeskLinkServer:
             await provider.prev()
         elif action == "seek":
             await provider.seek(int(msg.get("positionMs", 0)))
+
+
+def _init_com_mta() -> None:
+    """Claim a multithreaded COM apartment on the current thread (Windows only).
+
+    Must run on the event-loop thread before WASAPI capture or WinRT/SMTC use.
+    See the note in ``DeskLinkServer.run``. No-op (and never fatal) elsewhere.
+    """
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        COINIT_MULTITHREADED = 0x0
+        # S_OK (0) or S_FALSE (1) = already initialized this way; both are fine.
+        hr = ctypes.windll.ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
+        log.debug("CoInitializeEx(MTA) hr=0x%08x", hr & 0xFFFFFFFF)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("CoInitializeEx failed: %s", e)
 
 
 def _set_nodelay(ws: WebSocketServerProtocol) -> None:
