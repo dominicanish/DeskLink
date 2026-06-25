@@ -21,6 +21,20 @@ final class AppModel: ObservableObject {
     @Published var micPermissionDenied = false
 
     init() {
+        // SwiftUI does not observe *nested* ObservableObjects: views read
+        // `model.client.state` / `model.discovery.servers`, but only subscribe to
+        // AppModel's own `objectWillChange`. Forward the children's change
+        // notifications so the UI re-renders when the connection state, now-playing,
+        // transport caps or the discovered-server list change. (Without this the
+        // player stays stuck on "Connecting…", metadata never refreshes, and found
+        // servers only appear after some *other* AppModel change forces a redraw.)
+        client.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        discovery.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
         // Route incoming PC audio into the engine.
         client.onPlaybackPayload = { [weak self] payload in
             self?.audio.enqueuePlayback(payload)

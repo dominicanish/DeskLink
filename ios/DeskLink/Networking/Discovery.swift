@@ -15,6 +15,7 @@ final class Discovery: ObservableObject {
     @Published private(set) var servers: [DiscoveredServer] = []
 
     private var browser: NWBrowser?
+    private var restarts = 0
 
     func start() {
         guard browser == nil else { return }
@@ -30,13 +31,38 @@ final class Discovery: ObservableObject {
                     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             }
         }
+        // The Local Network permission prompt resolves *after* the first browse
+        // starts; on a fresh install the browser can fail/stall before the user
+        // grants access. Restart it when it fails so discovery recovers on its
+        // own instead of only appearing after some other action forces a retry.
+        browser.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in
+                guard let self else { return }
+                // `.cancelled` is always intentional (stop/restart) — ignore it to
+                // avoid a restart loop; only recover from `.failed`.
+                if case .failed = state { self.restart() }
+            }
+        }
         browser.start(queue: .main)
+    }
+
+    private func restart() {
+        guard restarts < 5 else { return }
+        restarts += 1
+        browser?.cancel()
+        browser = nil
+        // Brief backoff, then browse again (e.g. once permission is granted).
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            self.start()
+        }
     }
 
     func stop() {
         browser?.cancel()
         browser = nil
         servers = []
+        restarts = 0
     }
 
     private static func map(_ result: NWBrowser.Result) -> DiscoveredServer? {
