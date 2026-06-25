@@ -86,6 +86,7 @@ struct PlayerView: View {
                 Button { model.togglePlayPause() } label: {
                     Image(systemName: np.playing ? "pause.fill" : "play.fill")
                         .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(.black)
                         .frame(width: 76, height: 76)
                 }
                 .buttonStyle(.glassProminent)

@@ -61,6 +61,17 @@ final class DeskLinkClient: ObservableObject {
         }
         conn.start(queue: .main)
         receiveLoop()
+
+        // If the handshake never completes, surface a helpful hint instead of
+        // spinning forever. The usual cause is the iOS Local Network permission
+        // being off, which blocks local connections silently.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 9_000_000_000)
+            guard let self else { return }
+            if case .connecting = self.state {
+                self.state = .failed("Couldn't reach the server. Open Settings → DeskLink and turn on Local Network, then check the IP/port and that you're on the same Wi-Fi.")
+            }
+        }
     }
 
     func disconnect() {

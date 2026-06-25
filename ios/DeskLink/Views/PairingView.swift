@@ -53,7 +53,7 @@ struct ManualConnectSheet: View {
                                       pairingCode: code.isEmpty ? nil : code)
                 dismiss()
             } label: {
-                Text("Connect").frame(maxWidth: .infinity)
+                Text("Connect").frame(maxWidth: .infinity).foregroundStyle(.black)
             }
             .buttonStyle(.glassProminent)
             .disabled(address.isEmpty)
@@ -98,7 +98,7 @@ struct PairingSheet: View {
                 model.connect(to: server, pairingCode: code)
                 dismiss()
             } label: {
-                Text("Connect").frame(maxWidth: .infinity)
+                Text("Connect").frame(maxWidth: .infinity).foregroundStyle(.black)
             }
             .buttonStyle(.glassProminent)
             .disabled(code.count < 6)

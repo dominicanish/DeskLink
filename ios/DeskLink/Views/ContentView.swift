@@ -17,12 +17,37 @@ struct ContentView: View {
                 ProgressView("Connecting…").controlSize(.large)
             case .pairing:
                 PairingView()
+            case .failed(let message):
+                FailedView(message: message)
             default:
                 DiscoveryView()
             }
         }
         .animation(.smooth, value: model.client.state)
         .onAppear { model.onAppear() }
+    }
+}
+
+/// Shown when a connection attempt fails or times out.
+struct FailedView: View {
+    @EnvironmentObject var model: AppModel
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Can't connect").font(.title2.weight(.semibold))
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+            Button("Try again") { model.disconnect() }
+                .buttonStyle(.glass)
+                .padding(.top, 4)
+        }
     }
 }
 

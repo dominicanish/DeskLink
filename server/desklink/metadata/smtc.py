@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from dataclasses import dataclass
+
+log = logging.getLogger("desklink.smtc")
 
 try:
     from winsdk.windows.media.control import (  # type: ignore
@@ -35,6 +38,21 @@ except Exception:  # pragma: no cover - Windows-only dependency
 
 def available() -> bool:
     return _AVAILABLE
+
+
+def _to_ms(value) -> int:
+    """SMTC TimeSpan -> milliseconds, tolerating either projection shape.
+
+    winsdk usually projects Windows.Foundation.TimeSpan as datetime.timedelta,
+    but some builds surface raw 100-ns ticks (int). Handle both.
+    """
+    try:
+        return int(value.total_seconds() * 1000)        # datetime.timedelta
+    except AttributeError:
+        try:
+            return int(int(value) / 10_000)             # 100-ns ticks
+        except (TypeError, ValueError):
+            return 0
 
 
 @dataclass
@@ -87,37 +105,54 @@ class SmtcProvider:
         return self._manager.get_current_session()
 
     async def poll(self) -> NowPlaying | None:
-        """Return the current NowPlaying, or None if nothing is playing."""
+        """Return the current NowPlaying, or None if nothing is playing.
+
+        Each piece is read defensively: a failure in one (e.g. timeline shape
+        differences between apps) must not wipe out the whole now-playing.
+        """
         session = self._current_session()
         if session is None:
             return None
 
-        props = await session.try_get_media_properties_async()
-        playback = session.get_playback_info()
-        timeline = session.get_timeline_properties()
+        np = NowPlaying()
+        props = None
 
-        controls = playback.controls
-        status = playback.playback_status
-        playing = status == PlaybackStatus.PLAYING
+        try:
+            props = await session.try_get_media_properties_async()
+            np.title = props.title or ""
+            np.artist = props.artist or ""
+            np.album = props.album_title or ""
+        except Exception as e:
+            log.warning("media properties failed: %s", e)
 
-        np = NowPlaying(
-            title=props.title or "",
-            artist=props.artist or "",
-            album=props.album_title or "",
-            app=session.source_app_user_model_id or "",
-            duration_ms=int(timeline.end_time.total_seconds() * 1000),
-            position_ms=int(timeline.position.total_seconds() * 1000),
-            playing=playing,
-            can_next=bool(controls.is_next_enabled),
-            can_prev=bool(controls.is_previous_enabled),
-            can_seek=bool(controls.is_playback_position_enabled),
-        )
+        try:
+            np.app = session.source_app_user_model_id or ""
+        except Exception:
+            pass
+
+        try:
+            playback = session.get_playback_info()
+            np.playing = playback.playback_status == PlaybackStatus.PLAYING
+            controls = playback.controls
+            np.can_next = bool(controls.is_next_enabled)
+            np.can_prev = bool(controls.is_previous_enabled)
+            np.can_seek = bool(controls.is_playback_position_enabled)
+        except Exception as e:
+            log.debug("playback info failed: %s", e)
+
+        try:
+            timeline = session.get_timeline_properties()
+            np.duration_ms = _to_ms(timeline.end_time)
+            np.position_ms = _to_ms(timeline.position)
+        except Exception as e:
+            log.debug("timeline failed: %s", e)
 
         # Only ship artwork when the track actually changes (it's the heavy part).
-        track_key = (np.title, np.artist)
-        if track_key != self._last_track_key:
-            np.artwork_jpeg_b64 = await _read_thumbnail_b64(props)
-            self._last_track_key = track_key
+        if props is not None:
+            track_key = (np.title, np.artist)
+            if track_key != self._last_track_key:
+                np.artwork_jpeg_b64 = await _read_thumbnail_b64(props)
+                self._last_track_key = track_key
 
         return np
 
