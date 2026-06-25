@@ -83,6 +83,9 @@ class DeskLinkServer:
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
+        # iOS opens short TCP reachability probes that never send a WebSocket
+        # upgrade; that's harmless, so don't dump tracebacks for failed handshakes.
+        logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
         await self.smtc.start()
         self._start_capture()
 
