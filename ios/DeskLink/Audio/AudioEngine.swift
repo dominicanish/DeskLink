@@ -90,8 +90,8 @@ final class AudioEngine {
                                          frameCapacity: AVAudioFrameCount(frames)) else { return nil }
         buf.frameLength = AVAudioFrameCount(frames)
         if let dst = buf.int16ChannelData {
-            data.withUnsafeBytes { raw in
-                memcpy(dst[0], raw.baseAddress!, frames * bytesPerFrame)
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                _ = memcpy(dst[0], raw.baseAddress!, frames * bytesPerFrame)
             }
         }
         return buf

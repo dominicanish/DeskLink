@@ -3,6 +3,9 @@ name: iOS build
 # Builds an UNSIGNED .ipa on a macOS runner (no Mac needed locally) and uploads
 # it as an artifact. Sideload it with AltStore / SideStore — they sign it with
 # your free Apple ID. See docs/INSTALL_IOS.md.
+#
+# Liquid Glass (.glassEffect / GlassEffectContainer / .buttonStyle(.glass)) needs
+# the iOS 26 SDK, so this runs on the macos-26 image (ships Xcode 26).
 
 on:
   push:
@@ -14,7 +17,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     defaults:
       run:
         working-directory: ios
@@ -22,8 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select latest Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_26.app || sudo xcode-select -switch /Applications/Xcode.app
+      - name: Show Xcode version
+        run: |
+          sudo xcode-select -switch /Applications/Xcode.app || true
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i ios || true
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -35,16 +41,6 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild \
-            -project DeskLink.xcodeproj \
-            -scheme DeskLink \
-            -configuration Release \
-            -sdk iphoneos \
-            -archivePath "$RUNNER_TEMP/DeskLink.xcarchive" \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            archive | xcpretty || xcodebuild \
             -project DeskLink.xcodeproj \
             -scheme DeskLink \
             -configuration Release \

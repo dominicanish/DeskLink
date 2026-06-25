@@ -26,7 +26,7 @@ def _banner(c: cfg.ServerConfig, ip: str) -> None:
     print("==================== DeskLink " + __version__ + " ====================")
     print(f"  Server name : {c.name}")
     print(f"  Address     : {ip}:{c.port}")
-    print(f"  Bonjour     : auto-discovered on your iPhone")
+    print("  Bonjour     : auto-discovered on your iPhone")
     print(f"  Audio codec : {codec_name}")
     print(f"  Pairing code: {pairing}")
     print("=========================================================")

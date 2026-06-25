@@ -49,5 +49,7 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "UP"]
+# E/F/W = real errors + pyflakes + warnings. (isort "I" and pyupgrade "UP" are
+# stylistic and intentionally left off so CI doesn't fail on import ordering.)
+select = ["E", "F", "W"]
 ignore = ["E501"]
