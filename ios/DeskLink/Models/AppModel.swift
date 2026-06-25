@@ -20,12 +20,9 @@ final class AppModel: ObservableObject {
     @Published var serverName = "DeskLink"
     @Published var micPermissionDenied = false
 
-    /// Mic capture is temporarily disabled. Enabling it switches the audio session
-    /// to `.playAndRecord`, which currently silences the PC playback on-device.
-    /// Keeping the session on `.playback` guarantees playback never dies. Re-enable
-    /// when we build mic transmission properly (the server also needs a virtual mic
-    /// device for it to be usable by PC apps).
-    let micCaptureEnabled = false
+    /// Mic capture (phone → PC virtual microphone). The server renders it into the
+    /// VB-CABLE virtual mic so PC apps can use it.
+    let micCaptureEnabled = true
 
     init() {
         // SwiftUI does not observe *nested* ObservableObjects: views read
@@ -130,10 +127,11 @@ final class AppModel: ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     guard granted else { self.micPermissionDenied = true; return }
-                    // The tap callback runs on an audio thread; hop to the main
-                    // actor before touching the @MainActor WebSocket client.
+                    // sendMicFrame is nonisolated and thread-safe, so call it
+                    // directly from the audio thread — hopping every frame to the
+                    // main actor starved the playback receive loop (silence).
                     let started = self.audio.startMic { [weak self] payload, ts in
-                        Task { @MainActor in self?.client.sendMicFrame(payload, timestampMicros: ts) }
+                        self?.client.sendMicFrame(payload, timestampMicros: ts)
                     }
                     guard started else { return }   // mic failed to open; stay off
                     self.client.sendControl(DeskLinkProtocol.mic(enabled: true))

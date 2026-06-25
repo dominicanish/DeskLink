@@ -78,6 +78,9 @@ final class AudioEngine {
         try session.setPreferredSampleRate(sampleRate)
         try session.setPreferredIOBufferDuration(0.01)   // ~10 ms; keep latency low
         try session.setActive(true)
+        // Force the loudspeaker — in playAndRecord the route can otherwise default
+        // to the (silent-seeming) receiver, which looked like "no audio with mic on".
+        try? session.overrideOutputAudioPort(.speaker)
     }
 
     // MARK: Engine lifecycle

@@ -19,6 +19,37 @@ from .discovery import Advertiser
 from .server import serve
 
 
+def _install_vmic() -> None:
+    """Install (or confirm) the VB-CABLE virtual microphone, then report status."""
+    from .audio import vmic
+    try:
+        import pyaudiowpatch as pyaudio  # type: ignore
+    except Exception:
+        print("PyAudioWPatch isn't installed. Run the server once (or pip install desklink[windows]).")
+        return
+
+    pa = pyaudio.PyAudio()
+    if vmic.installed(pa):
+        print(f'Virtual mic already installed. Select "{vmic.CABLE_CAPTURE_NAME}" as the microphone in your PC app.')
+        pa.terminate()
+        return
+    pa.terminate()
+
+    print("Installing the VB-CABLE virtual microphone (you'll get a Windows UAC prompt)…")
+    if not vmic.install():
+        print("Install did not complete. See the messages above.")
+        return
+
+    pa = pyaudio.PyAudio()
+    ok = vmic.installed(pa)
+    pa.terminate()
+    if ok:
+        print(f'\nDone. In your PC app, choose "{vmic.CABLE_CAPTURE_NAME}" as the microphone,')
+        print("then enable the mic in the DeskLink phone app.")
+    else:
+        print("\nThe cable isn't visible yet — a reboot may be required, then re-run with --install-vmic.")
+
+
 def _banner(c: cfg.ServerConfig, ip: str) -> None:
     codec_name = "Opus (low-latency)" if codec.opus_available() else "PCM (install opus extra)"
     pairing = c.pairing_code if c.pairing_required else "disabled (open LAN)"
@@ -41,6 +72,8 @@ def main() -> None:
     parser.add_argument("--no-pairing", action="store_true", help="disable the pairing code")
     parser.add_argument("--low-latency", action="store_true", help="use 10 ms audio frames")
     parser.add_argument("--no-opus", action="store_true", help="force raw PCM")
+    parser.add_argument("--install-vmic", action="store_true",
+                        help="install the VB-CABLE virtual microphone driver, then exit")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -48,6 +81,10 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S",
     )
+
+    if args.install_vmic:
+        _install_vmic()
+        return
 
     if args.low_latency:
         cfg.FRAME_MS = 10  # type: ignore[attr-defined]
