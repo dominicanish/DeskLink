@@ -120,10 +120,11 @@ final class AppModel: ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     guard granted else { self.micPermissionDenied = true; return }
-                    self.client.sendControl(DeskLinkProtocol.mic(enabled: true))
-                    self.audio.startMic { [weak self] payload, ts in
+                    let started = self.audio.startMic { [weak self] payload, ts in
                         self?.client.sendMicFrame(payload, timestampMicros: ts)
                     }
+                    guard started else { return }   // mic failed to open; stay off
+                    self.client.sendControl(DeskLinkProtocol.mic(enabled: true))
                     self.micEnabled = true
                 }
             }

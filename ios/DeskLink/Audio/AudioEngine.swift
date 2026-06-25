@@ -56,8 +56,11 @@ final class AudioEngine {
     /// Upgrade the session so the mic can be captured. Called from `startMic`.
     private func enableRecordingSession() throws {
         let session = AVAudioSession.sharedInstance()
+        // Keep options minimal so the I/O stays at 48 kHz and playback quality
+        // isn't degraded. (A2DP is output-only and conflicts with record; voice
+        // modes can force a lower voice-optimized rate.)
         try session.setCategory(.playAndRecord, mode: .default,
-                                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker])
+                                options: [.defaultToSpeaker, .allowBluetooth])
         try session.setActive(true)
     }
 
@@ -160,30 +163,40 @@ final class AudioEngine {
 
     // MARK: Mic (phone -> server)
 
-    func startMic(onFrame: @escaping (Data, UInt64) -> Void) {
-        guard !micActive else { return }
-        // Upgrade the audio session and restart the engine so the input node
-        // becomes available; bail out gracefully on any failure.
-        engine.pause()
+    /// Mic capture must be enabled *only* after the record permission is granted
+    /// (the caller guarantees this). We fully stop the engine before touching the
+    /// input node and reconfiguring the session — mutating a live graph (the old
+    /// `pause()` path) and tapping with a mismatched format threw an uncatchable
+    /// Objective-C exception that crashed the app.
+    @discardableResult
+    func startMic(onFrame: @escaping (Data, UInt64) -> Void) -> Bool {
+        guard !micActive else { return true }
+
+        if engine.isRunning { engine.stop() }
         do {
             try enableRecordingSession()
         } catch {
-            try? engine.start()
-            return
+            // Couldn't switch to record — restore playback-only and keep playing.
+            restorePlaybackSession()
+            return false
         }
+
         let input = engine.inputNode
-        let hwFormat = input.inputFormat(forBus: 0)
-        guard hwFormat.channelCount > 0,
+        // The tap is on the input node's *output* bus, so its format must be
+        // `outputFormat(forBus:)` — using a different format is what asserts.
+        let tapFormat = input.outputFormat(forBus: 0)
+        guard tapFormat.channelCount > 0, tapFormat.sampleRate > 0,
               let micFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
                                             channels: 1, interleaved: true),
-              let conv = AVAudioConverter(from: hwFormat, to: micFormat) else {
-            try? engine.start()
-            return
+              let conv = AVAudioConverter(from: tapFormat, to: micFormat) else {
+            restorePlaybackSession()
+            return false
         }
+
         onMicFrame = onFrame
-        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 1024, format: tapFormat) { [weak self] buffer, _ in
             guard let self else { return }
-            let ratio = micFormat.sampleRate / hwFormat.sampleRate
+            let ratio = micFormat.sampleRate / tapFormat.sampleRate
             let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
             guard let out = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: cap) else { return }
             var fed = false
@@ -204,15 +217,27 @@ final class AudioEngine {
         } catch {
             input.removeTap(onBus: 0)
             onMicFrame = nil
-            return
+            restorePlaybackSession()
+            return false
         }
         micActive = true
+        return true
     }
 
     func stopMic() {
         guard micActive else { return }
+        if engine.isRunning { engine.stop() }
         engine.inputNode.removeTap(onBus: 0)
         micActive = false
         onMicFrame = nil
+        restorePlaybackSession()
+    }
+
+    /// Return to the playback-only session and resume playback (used after the
+    /// mic stops or fails to start).
+    private func restorePlaybackSession() {
+        if engine.isRunning { engine.stop() }
+        try? configureSession()
+        try? engine.start()
     }
 }
