@@ -54,6 +54,12 @@ final class AppModel: ObservableObject {
         client.connect(to: server.endpoint, pairingCode: pairingCode)
     }
 
+    /// Manual connection by IP/host when Bonjour discovery isn't available.
+    func connectManually(host: String, port: UInt16, pairingCode: String?) {
+        serverName = host
+        client.connect(host: host, port: port, pairingCode: pairingCode)
+    }
+
     func disconnect() {
         client.disconnect()
         teardownAudio()

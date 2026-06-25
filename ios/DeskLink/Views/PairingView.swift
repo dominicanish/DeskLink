@@ -17,6 +17,62 @@ struct PairingView: View {
     }
 }
 
+/// Bottom sheet to connect by typed IP/host when Bonjour discovery fails.
+struct ManualConnectSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var address = ""
+    @State private var code = ""
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Text("Connect by IP").font(.headline)
+            Text("Type the address shown by the PC server, e.g. 192.168.1.50:8765")
+                .font(.subheadline).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            TextField("192.168.1.50:8765", text: $address)
+                .keyboardType(.numbersAndPunctuation)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .multilineTextAlignment(.center)
+                .font(.system(.title3, design: .rounded).weight(.medium))
+                .padding()
+                .glassEffect(.regular, in: .rect(cornerRadius: 16))
+
+            TextField("Pairing code (optional)", text: $code)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.center)
+                .padding()
+                .glassEffect(.regular, in: .rect(cornerRadius: 16))
+                .onChange(of: code) { _, new in code = String(new.prefix(6)) }
+
+            Button {
+                let (host, port) = Self.parse(address)
+                model.connectManually(host: host, port: port,
+                                      pairingCode: code.isEmpty ? nil : code)
+                dismiss()
+            } label: {
+                Text("Connect").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            .disabled(address.isEmpty)
+        }
+        .padding(24)
+    }
+
+    /// Split "host:port" → (host, port); default port 8765.
+    static func parse(_ raw: String) -> (String, UInt16) {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if let colon = trimmed.lastIndex(of: ":") {
+            let host = String(trimmed[..<colon])
+            let port = UInt16(trimmed[trimmed.index(after: colon)...]) ?? 8765
+            return (host, port)
+        }
+        return (trimmed, 8765)
+    }
+}
+
 /// Bottom sheet to enter the pairing code before connecting.
 struct PairingSheet: View {
     @EnvironmentObject var model: AppModel

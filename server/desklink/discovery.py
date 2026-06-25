@@ -22,6 +22,25 @@ def _primary_ipv4() -> str:
         s.close()
 
 
+def _all_ipv4() -> list[str]:
+    """All non-loopback IPv4 addresses, primary route first.
+
+    Advertising every interface address (not just one) helps clients reach the
+    PC on machines with extra adapters (WSL/Hyper-V/VPN), where the wrong one
+    might otherwise be published.
+    """
+    primary = _primary_ipv4()
+    found: list[str] = [primary] if primary != "127.0.0.1" else []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in found:
+                found.append(ip)
+    except OSError:
+        pass
+    return found or ["127.0.0.1"]
+
+
 class Advertiser:
     def __init__(self, name: str, port: int):
         self._zc: Zeroconf | None = None
@@ -30,12 +49,13 @@ class Advertiser:
         self._port = port
 
     def start(self) -> str:
-        ip = _primary_ipv4()
+        ips = _all_ipv4()
+        ip = ips[0]
         safe = self._name.replace(".", "-")
         self._info = ServiceInfo(
             SERVICE_TYPE,
             name=f"{safe}.{SERVICE_TYPE}",
-            addresses=[socket.inet_aton(ip)],
+            addresses=[socket.inet_aton(a) for a in ips],
             port=self._port,
             properties={"v": "1", "name": self._name},
             server=f"{safe}.local.",

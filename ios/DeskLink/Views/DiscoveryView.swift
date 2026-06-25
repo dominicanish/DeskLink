@@ -4,6 +4,7 @@ import SwiftUI
 struct DiscoveryView: View {
     @EnvironmentObject var model: AppModel
     @State private var pendingServer: DiscoveredServer?
+    @State private var showManual = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -25,10 +26,25 @@ struct DiscoveryView: View {
                 .padding(.horizontal)
             }
             Spacer()
+
+            Button {
+                showManual = true
+            } label: {
+                Label("Connect by IP address", systemImage: "keyboard")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(.glass)
+            .padding(.bottom, 30)
         }
         .padding(.top, 60)
         .sheet(item: $pendingServer) { server in
             PairingSheet(server: server)
+                .presentationDetents([.medium])
+                .presentationBackground(.thinMaterial)
+        }
+        .sheet(isPresented: $showManual) {
+            ManualConnectSheet()
                 .presentationDetents([.medium])
                 .presentationBackground(.thinMaterial)
         }

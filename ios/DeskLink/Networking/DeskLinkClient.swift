@@ -34,6 +34,13 @@ final class DeskLinkClient: ObservableObject {
     private var pairingCode: String?
     private var clientName = UIDeviceName()
 
+    /// Connect by typed IP/host + port (Bonjour-independent fallback).
+    func connect(host: String, port: UInt16, pairingCode: String?) {
+        let ep = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
+                                     port: NWEndpoint.Port(rawValue: port) ?? 8765)
+        connect(to: ep, pairingCode: pairingCode)
+    }
+
     func connect(to endpoint: NWEndpoint, pairingCode: String?) {
         disconnect()
         self.pairingCode = pairingCode
