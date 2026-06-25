@@ -37,6 +37,10 @@ final class AudioEngine {
     private var micActive = false
     private var onMicFrame: ((Data, UInt64) -> Void)?
     private(set) var outputMuted = false
+    // Once the mic has been used we keep the `.playAndRecord` session for the rest
+    // of the connection, so later mic toggles are just tap install/remove with no
+    // engine restart (restarting on every toggle killed audio / added latency).
+    private var recordSessionActive = false
 
     // Mic wire format the server expects: 48 kHz mono s16le. The tap delivers the
     // hardware's native format; we convert to this. Converter is built lazily from
@@ -66,11 +70,11 @@ final class AudioEngine {
     /// Upgrade the session so the mic can be captured. Called from `startMic`.
     private func enableRecordingSession() throws {
         let session = AVAudioSession.sharedInstance()
-        // Keep options minimal so the I/O stays at 48 kHz and playback quality
-        // isn't degraded. (A2DP is output-only and conflicts with record; voice
-        // modes can force a lower voice-optimized rate.)
-        try session.setCategory(.playAndRecord, mode: .default,
-                                options: [.defaultToSpeaker, .allowBluetooth])
+        // `.defaultToSpeaker` only — do NOT allow Bluetooth here: in playAndRecord
+        // `.allowBluetooth` forces the low-quality HFP call profile and can route
+        // playback away from the speaker, which killed the PC audio while the mic
+        // was on. `.default` mode keeps full-range 48 kHz playback.
+        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
         try session.setPreferredSampleRate(sampleRate)
         try session.setPreferredIOBufferDuration(0.01)   // ~10 ms; keep latency low
         try session.setActive(true)
@@ -113,6 +117,7 @@ final class AudioEngine {
 
     func stop() {
         stopMic()
+        recordSessionActive = false
         if engine.isRunning { engine.stop() }
         if let n = sourceNode { engine.detach(n); sourceNode = nil }
     }
@@ -188,39 +193,35 @@ final class AudioEngine {
     // MARK: Mic (phone -> server)
 
     /// Mic capture must be enabled *only* after the record permission is granted
-    /// (the caller guarantees this). We fully stop the engine before reconfiguring
-    /// the session for record, then install the tap with `format: nil` so the tap
-    /// adopts the input bus's *own* hardware format. Passing an explicit format
-    /// (even `inputFormat`/`outputFormat(forBus:)`) didn't match the bus exactly
-    /// on-device and made `CreateRecordingTap` throw an uncatchable Obj-C
-    /// exception (SIGABRT) that crashed the app.
+    /// (the caller guarantees this). On the first enable we upgrade the session to
+    /// `.playAndRecord` and rebuild the playback graph under it once; after that the
+    /// engine stays running so each later toggle is just a tap install/remove — no
+    /// engine restart (restarting every toggle dropped audio and added latency).
     @discardableResult
     func startMic(onFrame: @escaping (Data, UInt64) -> Void) -> Bool {
         guard !micActive else { return true }
 
-        do {
-            try enableRecordingSession()
-        } catch {
-            // Couldn't switch to record — restore playback-only and keep playing.
-            restorePlaybackSession()
-            return false
+        // First time only: upgrade to the record session and rebuild the playback
+        // graph under it once. After this the engine stays running in
+        // `.playAndRecord`, so enabling the mic again is just a re-tap.
+        if !recordSessionActive {
+            do {
+                try enableRecordingSession()
+                try startPlaybackGraph()   // rebuild playback under the new session
+                recordSessionActive = true
+            } catch {
+                // Roll back to playback-only and keep playing.
+                recordSessionActive = false
+                restorePlaybackSession()
+                return false
+            }
         }
 
         onMicFrame = onFrame
         micConverter = nil   // rebuilt lazily from the first buffer's real format
-
-        // Rebuild + restart the playback graph under the new (record) session and
-        // drop the backlog, so playback survives the switch and latency stays low.
-        // Starting the engine first also lets the input route/format settle before
-        // we tap (the crash log showed an in-flight `IOFormatsChanged`).
-        do {
-            try startPlaybackGraph()
-        } catch {
-            onMicFrame = nil
-            restorePlaybackSession()
-            return false
-        }
-        // Tap with `format: nil` so the tap adopts the input bus's own format.
+        // The engine is already running with a settled route; tap with `format:
+        // nil` so the tap adopts the input bus's own format (an explicit format
+        // didn't match the bus on-device and crashed inside CreateRecordingTap).
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             self?.handleMicBuffer(buffer)
         }
@@ -255,15 +256,15 @@ final class AudioEngine {
 
     func stopMic() {
         guard micActive else { return }
+        // Just stop capturing — keep the record session + engine running so the
+        // next enable is a cheap re-tap (no restart → no audio drop, no latency).
         engine.inputNode.removeTap(onBus: 0)
         micActive = false
         onMicFrame = nil
-        restorePlaybackSession()
     }
 
-    /// Return to the playback-only session and rebuild/restart playback (used after
-    /// the mic stops or fails to start). Reconnecting the graph is what keeps audio
-    /// alive across repeated mic on/off cycles.
+    /// Roll back to the playback-only session and rebuild playback (used only when
+    /// the mic *fails* to start). The normal mic-off path keeps the record session.
     private func restorePlaybackSession() {
         try? configureSession()
         try? startPlaybackGraph()

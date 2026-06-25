@@ -89,6 +89,10 @@ private struct ServerRow: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity)
-        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        // `.interactive()` gives the glass real press feedback (it looked inert
+        // before); `.contentShape` makes the whole row tappable, not just the
+        // drawn text/icons (a `.buttonStyle(.plain)` label only hit-tests those).
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+        .contentShape(.rect(cornerRadius: 20))
     }
 }
