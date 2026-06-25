@@ -35,6 +35,13 @@ final class AudioEngine {
     private var onMicFrame: ((Data, UInt64) -> Void)?
     private(set) var outputMuted = false
 
+    // Mic wire format the server expects: 48 kHz mono s16le. The tap delivers the
+    // hardware's native format; we convert to this. Converter is built lazily from
+    // the first buffer's actual format (we don't assume the input rate up front).
+    private lazy var micWireFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
+                                                   channels: 1, interleaved: true)!
+    private var micConverter: AVAudioConverter?
+
     init() {
         ring = [Float](repeating: 0, count: capFrames * 2)
     }
@@ -56,8 +63,11 @@ final class AudioEngine {
     /// Upgrade the session so the mic can be captured. Called from `startMic`.
     private func enableRecordingSession() throws {
         let session = AVAudioSession.sharedInstance()
+        // Keep options minimal so the I/O stays at 48 kHz and playback quality
+        // isn't degraded. (A2DP is output-only and conflicts with record; voice
+        // modes can force a lower voice-optimized rate.)
         try session.setCategory(.playAndRecord, mode: .default,
-                                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker])
+                                options: [.defaultToSpeaker, .allowBluetooth])
         try session.setActive(true)
     }
 
@@ -160,59 +170,87 @@ final class AudioEngine {
 
     // MARK: Mic (phone -> server)
 
-    func startMic(onFrame: @escaping (Data, UInt64) -> Void) {
-        guard !micActive else { return }
-        // Upgrade the audio session and restart the engine so the input node
-        // becomes available; bail out gracefully on any failure.
-        engine.pause()
+    /// Mic capture must be enabled *only* after the record permission is granted
+    /// (the caller guarantees this). We fully stop the engine before reconfiguring
+    /// the session for record, then install the tap with `format: nil` so the tap
+    /// adopts the input bus's *own* hardware format. Passing an explicit format
+    /// (even `inputFormat`/`outputFormat(forBus:)`) didn't match the bus exactly
+    /// on-device and made `CreateRecordingTap` throw an uncatchable Obj-C
+    /// exception (SIGABRT) that crashed the app.
+    @discardableResult
+    func startMic(onFrame: @escaping (Data, UInt64) -> Void) -> Bool {
+        guard !micActive else { return true }
+
+        if engine.isRunning { engine.stop() }
         do {
             try enableRecordingSession()
         } catch {
-            try? engine.start()
-            return
+            // Couldn't switch to record — restore playback-only and keep playing.
+            restorePlaybackSession()
+            return false
         }
-        let input = engine.inputNode
-        let hwFormat = input.inputFormat(forBus: 0)
-        guard hwFormat.channelCount > 0,
-              let micFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
-                                            channels: 1, interleaved: true),
-              let conv = AVAudioConverter(from: hwFormat, to: micFormat) else {
-            try? engine.start()
-            return
-        }
+
         onMicFrame = onFrame
-        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            let ratio = micFormat.sampleRate / hwFormat.sampleRate
-            let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
-            guard let out = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: cap) else { return }
-            var fed = false
-            var err: NSError?
-            conv.convert(to: out, error: &err) { _, status in
-                if fed { status.pointee = .noDataNow; return nil }
-                fed = true; status.pointee = .haveData; return buffer
-            }
-            guard err == nil, let ch = out.int16ChannelData else { return }
-            let byteCount = Int(out.frameLength) * 2
-            let data = Data(bytes: ch[0], count: byteCount)
-            let ts = UInt64(Date().timeIntervalSince1970 * 1_000_000)
-            self.onMicFrame?(OpusCodec.available ? OpusCodec.encode(data) : data, ts)
-        }
+        micConverter = nil   // rebuilt lazily from the first buffer's real format
+        let input = engine.inputNode
+
+        // Start the engine *before* tapping so the input route/format has settled
+        // (the route is still changing right after the category switch — the crash
+        // log showed an in-flight `IOFormatsChanged`). Then tap with `format: nil`.
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
             onMicFrame = nil
-            return
+            restorePlaybackSession()
+            return false
+        }
+        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            self?.handleMicBuffer(buffer)
         }
         micActive = true
+        return true
+    }
+
+    /// Convert one captured buffer (native format) to 48 kHz mono s16le and ship it.
+    private func handleMicBuffer(_ buffer: AVAudioPCMBuffer) {
+        let inFormat = buffer.format
+        if micConverter == nil
+            || micConverter!.inputFormat.sampleRate != inFormat.sampleRate
+            || micConverter!.inputFormat.channelCount != inFormat.channelCount {
+            micConverter = AVAudioConverter(from: inFormat, to: micWireFormat)
+        }
+        guard let conv = micConverter, buffer.frameLength > 0 else { return }
+        let ratio = micWireFormat.sampleRate / inFormat.sampleRate
+        let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
+        guard cap > 0, let out = AVAudioPCMBuffer(pcmFormat: micWireFormat, frameCapacity: cap) else { return }
+        var fed = false
+        var err: NSError?
+        conv.convert(to: out, error: &err) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true; status.pointee = .haveData; return buffer
+        }
+        guard err == nil, out.frameLength > 0, let ch = out.int16ChannelData else { return }
+        let byteCount = Int(out.frameLength) * 2
+        let data = Data(bytes: ch[0], count: byteCount)
+        let ts = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        onMicFrame?(OpusCodec.available ? OpusCodec.encode(data) : data, ts)
     }
 
     func stopMic() {
         guard micActive else { return }
+        if engine.isRunning { engine.stop() }
         engine.inputNode.removeTap(onBus: 0)
         micActive = false
         onMicFrame = nil
+        restorePlaybackSession()
+    }
+
+    /// Return to the playback-only session and resume playback (used after the
+    /// mic stops or fails to start).
+    private func restorePlaybackSession() {
+        if engine.isRunning { engine.stop() }
+        try? configureSession()
+        try? engine.start()
     }
 }
