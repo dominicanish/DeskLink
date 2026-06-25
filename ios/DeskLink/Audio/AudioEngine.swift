@@ -30,6 +30,9 @@ final class AudioEngine {
     private var targetFrames = Int(48_000 * 0.1)  // ~100 ms jitter buffer
 
     private var sourceNode: AVAudioSourceNode?
+    // The source node's render format (48 kHz float, deinterleaved stereo).
+    private lazy var playFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+                                                channels: AVAudioChannelCount(channels), interleaved: false)!
 
     private var micActive = false
     private var onMicFrame: ((Data, UInt64) -> Void)?
@@ -68,28 +71,44 @@ final class AudioEngine {
         // modes can force a lower voice-optimized rate.)
         try session.setCategory(.playAndRecord, mode: .default,
                                 options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setPreferredSampleRate(sampleRate)
+        try session.setPreferredIOBufferDuration(0.01)   // ~10 ms; keep latency low
         try session.setActive(true)
     }
 
     // MARK: Engine lifecycle
 
     func start() throws {
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
-                                         channels: AVAudioChannelCount(channels), interleaved: false) else {
-            throw AudioError.format
-        }
-        os_unfair_lock_lock(&lock); writeIdx = 0; readIdx = 0; playing = false; os_unfair_lock_unlock(&lock)
+        try startPlaybackGraph()
+    }
 
-        let node = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, abl -> OSStatus in
-            guard let self else { return noErr }
-            return self.render(frameCount: Int(frameCount), abl: abl)
+    /// Build (once) and (re)start the playback graph. Safe to call repeatedly —
+    /// we reconnect the source node every time, because an engine stop/start
+    /// across an audio-session category change (mic on/off) otherwise leaves the
+    /// connection stale and playback goes silent until the app restarts.
+    private func startPlaybackGraph() throws {
+        if engine.isRunning { engine.stop() }
+        if sourceNode == nil {
+            let node = AVAudioSourceNode(format: playFormat) { [weak self] _, _, frameCount, abl -> OSStatus in
+                guard let self else { return noErr }
+                return self.render(frameCount: Int(frameCount), abl: abl)
+            }
+            engine.attach(node)
+            sourceNode = node
         }
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
-        sourceNode = node
+        engine.connect(sourceNode!, to: engine.mainMixerNode, format: playFormat)
         engine.mainMixerNode.outputVolume = outputMuted ? 0 : 1
+        resetJitterBuffer()
         engine.prepare()
         try engine.start()
+    }
+
+    /// Drop any buffered audio and re-arm the pre-roll. Called on every (re)start
+    /// so latency doesn't grow: while the engine is stopped (e.g. switching to the
+    /// mic session) the network keeps filling the ring, and without this we'd play
+    /// through that whole backlog.
+    private func resetJitterBuffer() {
+        os_unfair_lock_lock(&lock); writeIdx = 0; readIdx = 0; playing = false; os_unfair_lock_unlock(&lock)
     }
 
     func stop() {
@@ -102,8 +121,6 @@ final class AudioEngine {
         outputMuted = muted
         engine.mainMixerNode.outputVolume = muted ? 0 : 1
     }
-
-    enum AudioError: Error { case format }
 
     // MARK: Playback (server -> phone)
 
@@ -181,7 +198,6 @@ final class AudioEngine {
     func startMic(onFrame: @escaping (Data, UInt64) -> Void) -> Bool {
         guard !micActive else { return true }
 
-        if engine.isRunning { engine.stop() }
         do {
             try enableRecordingSession()
         } catch {
@@ -192,20 +208,20 @@ final class AudioEngine {
 
         onMicFrame = onFrame
         micConverter = nil   // rebuilt lazily from the first buffer's real format
-        let input = engine.inputNode
 
-        // Start the engine *before* tapping so the input route/format has settled
-        // (the route is still changing right after the category switch — the crash
-        // log showed an in-flight `IOFormatsChanged`). Then tap with `format: nil`.
+        // Rebuild + restart the playback graph under the new (record) session and
+        // drop the backlog, so playback survives the switch and latency stays low.
+        // Starting the engine first also lets the input route/format settle before
+        // we tap (the crash log showed an in-flight `IOFormatsChanged`).
         do {
-            engine.prepare()
-            try engine.start()
+            try startPlaybackGraph()
         } catch {
             onMicFrame = nil
             restorePlaybackSession()
             return false
         }
-        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+        // Tap with `format: nil` so the tap adopts the input bus's own format.
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             self?.handleMicBuffer(buffer)
         }
         micActive = true
@@ -239,18 +255,17 @@ final class AudioEngine {
 
     func stopMic() {
         guard micActive else { return }
-        if engine.isRunning { engine.stop() }
         engine.inputNode.removeTap(onBus: 0)
         micActive = false
         onMicFrame = nil
         restorePlaybackSession()
     }
 
-    /// Return to the playback-only session and resume playback (used after the
-    /// mic stops or fails to start).
+    /// Return to the playback-only session and rebuild/restart playback (used after
+    /// the mic stops or fails to start). Reconnecting the graph is what keeps audio
+    /// alive across repeated mic on/off cycles.
     private func restorePlaybackSession() {
-        if engine.isRunning { engine.stop() }
         try? configureSession()
-        try? engine.start()
+        try? startPlaybackGraph()
     }
 }

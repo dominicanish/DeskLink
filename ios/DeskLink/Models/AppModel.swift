@@ -39,9 +39,10 @@ final class AppModel: ObservableObject {
         client.onPlaybackPayload = { [weak self] payload in
             self?.audio.enqueuePlayback(payload)
         }
-        // Forward Dynamic Island / lock-screen transport buttons to the PC.
+        // Forward Dynamic Island / lock-screen transport buttons to the PC
+        // (optimistically, same as the in-app controls).
         nowPlaying.sendTransport = { [weak self] action in
-            self?.client.sendControl(DeskLinkProtocol.transport(action))
+            self?.sendTransport(action)
         }
 
         // Mirror now-playing + transport-state into the Dynamic Island.
@@ -141,11 +142,25 @@ final class AppModel: ObservableObject {
     }
 
     // Transport (also reachable from the Dynamic Island).
-    func play() { client.sendControl(DeskLinkProtocol.transport("play")) }
-    func pause() { client.sendControl(DeskLinkProtocol.transport("pause")) }
-    func togglePlayPause() { client.sendControl(DeskLinkProtocol.transport("toggle")) }
-    func next() { client.sendControl(DeskLinkProtocol.transport("next")) }
-    func previous() { client.sendControl(DeskLinkProtocol.transport("prev")) }
+    func play() { sendTransport("play") }
+    func pause() { sendTransport("pause") }
+    func togglePlayPause() { sendTransport("toggle") }
+    func next() { sendTransport("next") }
+    func previous() { sendTransport("prev") }
+
+    /// Send a transport command, updating local state *first* so the UI (and the
+    /// Dynamic Island) react instantly instead of waiting for the server round-trip.
+    /// The server's next now-playing tick (~1s) reconciles the truth, so if the
+    /// action didn't actually take effect the icon corrects itself automatically.
+    private func sendTransport(_ action: String) {
+        switch action {
+        case "play":   client.nowPlaying.playing = true
+        case "pause":  client.nowPlaying.playing = false
+        case "toggle": client.nowPlaying.playing.toggle()
+        default: break   // next/prev have no local state to predict
+        }
+        client.sendControl(DeskLinkProtocol.transport(action))
+    }
 
     private func startPing() {
         pingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
