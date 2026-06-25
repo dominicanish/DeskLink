@@ -38,6 +38,7 @@ struct DiscoveryView: View {
             .padding(.bottom, 30)
         }
         .padding(.top, 60)
+        .onAppear { model.discovery.start() }
         .sheet(item: $pendingServer) { server in
             PairingSheet(server: server)
                 .presentationDetents([.medium])

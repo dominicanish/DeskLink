@@ -29,13 +29,23 @@ final class AudioEngine {
 
     // MARK: Session
 
+    /// Playback-only session for listening (the common case). Using `.playback`
+    /// avoids touching the microphone input node — which would otherwise crash
+    /// AVAudioEngine when mic permission hasn't been granted. We upgrade to
+    /// `.playAndRecord` lazily in `startMic()`.
     func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord,
-                                mode: .default,
-                                options: [.allowBluetoothA2DP, .defaultToSpeaker, .mixWithOthers])
+        try session.setCategory(.playback, mode: .default, options: [])
         try session.setPreferredSampleRate(inputRate)
         try session.setPreferredIOBufferDuration(0.005)     // ~5 ms for low latency
+        try session.setActive(true)
+    }
+
+    /// Upgrade the session so the mic can be captured. Called from `startMic`.
+    private func enableRecordingSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .default,
+                                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker])
         try session.setActive(true)
     }
 
@@ -101,15 +111,27 @@ final class AudioEngine {
 
     func startMic(onFrame: @escaping (Data, UInt64) -> Void) {
         guard !micActive else { return }
-        onMicFrame = onFrame
+        // Upgrade the audio session and restart the engine so the input node
+        // becomes available; bail out gracefully on any failure.
+        engine.pause()
+        do {
+            try enableRecordingSession()
+        } catch {
+            try? engine.start(); player.play()
+            return
+        }
         let input = engine.inputNode
-        let hwFormat = input.outputFormat(forBus: 0)
-        // Target: 48 kHz mono s16le, 20 ms frames.
-        let micFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
-                                      channels: 1, interleaved: true)!
-        let conv = AVAudioConverter(from: hwFormat, to: micFormat)
+        let hwFormat = input.inputFormat(forBus: 0)
+        guard hwFormat.channelCount > 0,
+              let micFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
+                                            channels: 1, interleaved: true),
+              let conv = AVAudioConverter(from: hwFormat, to: micFormat) else {
+            try? engine.start(); player.play()
+            return
+        }
+        onMicFrame = onFrame
         input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buffer, _ in
-            guard let self, let conv else { return }
+            guard let self else { return }
             let ratio = micFormat.sampleRate / hwFormat.sampleRate
             let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
             guard let out = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: cap) else { return }
@@ -124,6 +146,15 @@ final class AudioEngine {
             let data = Data(bytes: ch[0], count: byteCount)
             let ts = UInt64(Date().timeIntervalSince1970 * 1_000_000)
             self.onMicFrame?(OpusCodec.available ? OpusCodec.encode(data) : data, ts)
+        }
+        do {
+            engine.prepare()
+            try engine.start()
+            player.play()
+        } catch {
+            input.removeTap(onBus: 0)
+            onMicFrame = nil
+            return
         }
         micActive = true
     }
