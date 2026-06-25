@@ -31,6 +31,11 @@ final class DeskLinkClient: ObservableObject {
     private(set) var micCodec = "pcm"
 
     private var task: URLSessionWebSocketTask?
+    /// Snapshot of `task` readable off the main actor for the mic-capture thread.
+    /// `URLSessionWebSocketTask.send` is thread-safe; the worst case of a stale
+    /// reference is a harmless failed send. Avoids hopping every mic frame to the
+    /// main actor (which starved the playback receive loop → silence while miced).
+    nonisolated(unsafe) private var micSendTask: URLSessionWebSocketTask?
     private var resolver: NWConnection?
     private var pairingCode: String?
     private let clientName = UIDeviceName()
@@ -68,6 +73,7 @@ final class DeskLinkClient: ObservableObject {
         state = .connecting
         let t = session.webSocketTask(with: url)
         task = t
+        micSendTask = t
         t.resume()                 // initiates the WebSocket handshake
         receive()
 
@@ -121,6 +127,7 @@ final class DeskLinkClient: ObservableObject {
     func disconnect() {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        micSendTask = nil
         resolver?.cancel(); resolver = nil
         state = .idle
         negotiatedCaps = []
@@ -132,11 +139,13 @@ final class DeskLinkClient: ObservableObject {
         task?.send(.string(text)) { _ in }
     }
 
-    func sendMicFrame(_ payload: Data, timestampMicros: UInt64) {
+    /// Called from the audio-capture thread (not the main actor) for each mic frame.
+    nonisolated func sendMicFrame(_ payload: Data, timestampMicros: UInt64) {
+        guard let t = micSendTask else { return }
         let frame = DeskLinkProtocol.encodeAudioFrame(stream: .mic,
                                                       timestampMicros: timestampMicros,
                                                       payload: payload)
-        task?.send(.data(frame)) { _ in }
+        t.send(.data(frame)) { _ in }
     }
 
     func ping() {
